@@ -3,7 +3,7 @@
     Jogos: Brookhaven RP (menu completo) e SCP AIMBOT (ESP + FPS + Aimbot)
     Ao executar, aparece "Usar no:" para escolher o jogo.
     Brookhaven: Jogador, Sistema, Veículos, Casas, Jogadores, Câmera, Locais, Música
-    SCP AIMBOT: ESP, FPS, Aimbot + SCP Troll (ESP SCPs, aimbot em SCPs, proteção anti-SCP / godmode)
+    SCP AIMBOT: ESP, FPS, Aimbot, SCP Troll, Jogadores (vida PvP, combate auto-tiro, wallbang)
     - Botão "F" abre/fecha o menu (arrastável)
     - Botão X (no topo do menu) apaga o script por completo
 ]]
@@ -212,6 +212,10 @@ local S = {
     scpAimbot = true,         -- aimbot também mira em SCPs
     scpLifeMode = "off",      -- "off" | "melhor" | "super" (só protege de SCPs, não de jogadores)
     antiInfect = false,       -- anti-infecção (409, 008, etc.)
+    -- Jogadores / combate
+    pLifeMode = "off",        -- vida vs jogadores: "off" | "melhor" | "super"
+    combatMode = false,       -- auto-atirar quando vê inimigo
+    wallbang = false,         -- tentativa de balas atravessarem parede
 }
 
 local hum0 = getHum()
@@ -492,6 +496,56 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------
+-- Wallbang (balas atravessam parede) — client / executor
+----------------------------------------------------------------
+local wallbangHooked = false
+local function setupWallbang()
+    if wallbangHooked then return end
+    wallbangHooked = true
+    -- tenta hook de Raycast (Synapse / Script-Ware / similares)
+    pcall(function()
+        if not hookmetamethod or not getnamecallmethod then return end
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if S.wallbang and method == "Raycast" and self == workspace then
+                local origin, dir, params = ...
+                if typeof(params) == "RaycastParams" then
+                    local np = RaycastParams.new()
+                    np.FilterType = Enum.RaycastFilterType.Exclude
+                    local filter = {getChar()}
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if p.Character then table.insert(filter, p.Character) end
+                    end
+                    -- ignora mapa: só colide com personagens (efeito wallbang)
+                    np.FilterDescendantsInstances = filter
+                    np.FilterType = Enum.RaycastFilterType.Include
+                    return old(self, origin, dir, np)
+                end
+            end
+            return old(self, ...)
+        end) or function(self, ...)
+            local method = getnamecallmethod()
+            if S.wallbang and method == "Raycast" and self == workspace then
+                local origin, dir, params = ...
+                if typeof(params) == "RaycastParams" then
+                    local np = RaycastParams.new()
+                    local filter = {}
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if p.Character then table.insert(filter, p.Character) end
+                    end
+                    np.FilterType = Enum.RaycastFilterType.Include
+                    np.FilterDescendantsInstances = filter
+                    return old(self, origin, dir, np)
+                end
+            end
+            return old(self, ...)
+        end)
+    end)
+end
+setupWallbang()
+
+----------------------------------------------------------------
 -- FLY
 ----------------------------------------------------------------
 local flyUI -- setter do toggle (definido depois)
@@ -587,8 +641,72 @@ connect(RunService.Heartbeat, function(dt)
                 end
             end
         end
-        -- longe de SCP: não mexe na vida → jogadores matam normal
+        -- longe de SCP: não mexe na vida → jogadores matam normal (salvo pLifeMode)
     end
+
+    -- Vida vs JOGADORES (quando alguém te atira)
+    if S.pLifeMode ~= "off" and h then
+        if S.pLifeMode == "super" then
+            if h.Health < h.MaxHealth then
+                h.Health = h.MaxHealth
+            end
+            pcall(function()
+                if h:GetState() == Enum.HumanoidStateType.Dead then
+                    h:ChangeState(Enum.HumanoidStateType.Running)
+                    h.Health = h.MaxHealth
+                end
+            end)
+        elseif S.pLifeMode == "melhor" then
+            -- quase não sente dano: regenera bem rápido
+            if h.Health < h.MaxHealth and h.Health > 0 then
+                h.Health = math.min(h.MaxHealth, h.Health + (55 * dt)) -- ~55 HP/s
+            end
+        end
+    end
+
+    -- Modo combate: auto-atirar quando inimigo no FOV / mira
+    if not _G._felixCombatCd then _G._felixCombatCd = 0 end
+    if S.combatMode and cam and root and tick() > _G._felixCombatCd then
+        local vp = cam.ViewportSize
+        local center = Vector2.new(vp.X / 2, vp.Y / 2)
+        local shouldShoot = false
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then
+                local ch = p.Character
+                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                local head = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
+                if hum and hum.Health > 0 and head then
+                    local sp, onScreen = cam:WorldToViewportPoint(head.Position)
+                    if onScreen and sp.Z > 0 then
+                        local dist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                        if dist <= (S.aimbotFov * 2.8) then
+                            shouldShoot = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if shouldShoot then
+            _G._felixCombatCd = tick() + 0.08 -- ~12 tiros/s máx
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 1)
+                task.delay(0.03, function()
+                    pcall(function()
+                        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 1)
+                    end)
+                end)
+            end)
+            pcall(function()
+                local vu = game:GetService("VirtualUser")
+                vu:CaptureController()
+                vu:ClickButton1(Vector2.new())
+            end)
+        end
+    end
+
+    -- wallbang é aplicado via hook (ver setupWallbang)
 
     if h then
         if S.speedOn then h.WalkSpeed = S.speed end
@@ -1482,6 +1600,63 @@ if chosenGame == "scp" then
         pcall(scanSCPs)
         pcall(refreshSCPLists)
     end)
+
+    ----------------------------------------------------------------
+    -- ABA: JOGADORES (combate PvP)
+    ----------------------------------------------------------------
+    local pPvP = addTab("Jogadores")
+    section(pPvP, "Vida vs jogadores")
+    infoLabel(pPvP, "Quando alguém atira em você. Funciona contra jogadores (diferente da vida só-SCP).")
+
+    local pLifeStatus = new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium, Text = "Modo atual: Desligado",
+        TextSize = 12, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = nextOrder(),
+    }, pPvP)
+
+    local function setPLifeMode(mode)
+        S.pLifeMode = mode
+        if mode == "super" then
+            pLifeStatus.Text = "Modo atual: Super vida (PvP)"
+            pLifeStatus.TextColor3 = C.danger
+        elseif mode == "melhor" then
+            pLifeStatus.Text = "Modo atual: Melhor vida (PvP)"
+            pLifeStatus.TextColor3 = C.on
+        else
+            pLifeStatus.Text = "Modo atual: Desligado"
+            pLifeStatus.TextColor3 = C.sub
+        end
+    end
+
+    buttonRow(pPvP, "Super vida", function()
+        setPLifeMode(S.pLifeMode == "super" and "off" or "super")
+    end, C.danger)
+    infoLabel(pPvP, "Super vida: cura total na hora. Quase imortal — podem achar que é hack.")
+
+    buttonRow(pPvP, "Melhor vida", function()
+        setPLifeMode(S.pLifeMode == "melhor" and "off" or "melhor")
+    end, C.on)
+    infoLabel(pPvP, "Melhor vida: regenera bem rápido quando toma tiro. Quase não sente dano — opção mais equilibrada.")
+
+    buttonRow(pPvP, "Desligar vida PvP", function()
+        setPLifeMode("off")
+    end)
+
+    section(pPvP, "Modo combate")
+    infoLabel(pPvP, "Se aparecer inimigo no FOV do aimbot, atira sozinho automaticamente.")
+    toggleRow(pPvP, "Modo combate (auto-tiro)", false, function(v) S.combatMode = v end)
+    infoLabel(pPvP, "Usa o mesmo tamanho de FOV do AIMBOT. Ligue o AIMBOT + combate pra ficar forte.")
+
+    section(pPvP, "Wallbang")
+    infoLabel(pPvP, "Tenta fazer as balas atravessarem paredes (hook de Raycast). Depende do executor e do jogo — pode não funcionar em todos os servidores.")
+    toggleRow(pPvP, "Balas atravessam parede", false, function(v)
+        S.wallbang = v
+        if v then setupWallbang() end
+    end)
+
+    section(pPvP, "ESP jogadores")
+    toggleRow(pPvP, "ESP (nome + distância)", false, function(v) S.esp = v end)
 
     selectTab("SCP")
 else
