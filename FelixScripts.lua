@@ -3,7 +3,7 @@
     Jogos: Brookhaven RP (menu completo) e SCP AIMBOT (ESP + FPS + Aimbot)
     Ao executar, aparece "Usar no:" para escolher o jogo.
     Brookhaven: Jogador, Sistema, Veículos, Casas, Jogadores, Câmera, Locais, Música
-    SCP AIMBOT: ESP, FPS boost, Aimbot profissional (centro fixo, ponto+cruz, predição, cor, sensibilidade)
+    SCP AIMBOT: ESP, FPS, Aimbot + SCP Troll (ESP SCPs, aimbot em SCPs, proteção anti-SCP / godmode)
     - Botão "F" abre/fecha o menu (arrastável)
     - Botão X (no topo do menu) apaga o script por completo
 ]]
@@ -207,6 +207,11 @@ local S = {
     aimbotInvis = true,       -- deixa invisível? (sem círculo visual)
     aimbotSens = 3,           -- sensibilidade 1 a 10 (maior = mais rápido/travado)
     aimbotColor = Color3.fromRGB(140, 80, 255), -- cor do círculo do AIMBOT
+    -- SCP Troll
+    scpEsp = false,
+    scpAimbot = true,         -- aimbot também mira em SCPs
+    scpLifeMode = "off",      -- "off" | "melhor" | "super" (só protege de SCPs, não de jogadores)
+    antiInfect = false,       -- anti-infecção (409, 008, etc.)
 }
 
 local hum0 = getHum()
@@ -257,6 +262,236 @@ connect(Players.PlayerAdded, createESP)
 connect(Players.PlayerRemoving, removeESP)
 
 ----------------------------------------------------------------
+-- SCP TROLL: detecção + ESP de SCPs
+----------------------------------------------------------------
+local SCP_KEYWORDS = {
+    "scp", "SCP", "096", "173", "049", "106", "682", "457", "966", "023",
+    "008", "079", "087", "093", "002", "066", "076", "131", "999", "2950",
+    "1299", "409", "299", "938", "939", "016", "316", "1025", "001",
+    "shy", "peanut", "plague", "burning", "able", "old man", "tickle",
+}
+
+-- Classificação por nome (Safe / Euclid / Keter)
+local SCP_CLASS = {
+    -- SAFE
+    ["131"] = "Safe", ["316"] = "Safe", ["999"] = "Safe", ["1025"] = "Safe", ["2950"] = "Safe",
+    ["tickle"] = "Safe", ["chair"] = "Safe", ["eyepod"] = "Safe",
+    -- EUCLID
+    ["002"] = "Euclid", ["008"] = "Euclid", ["023"] = "Euclid", ["049"] = "Euclid",
+    ["066"] = "Euclid", ["079"] = "Euclid", ["087"] = "Euclid", ["093"] = "Euclid",
+    ["096"] = "Euclid", ["173"] = "Euclid", ["966"] = "Euclid", ["1299"] = "Euclid",
+    ["shy"] = "Euclid", ["peanut"] = "Euclid", ["plague"] = "Euclid", ["sculpture"] = "Euclid",
+    -- KETER
+    ["016"] = "Keter", ["076"] = "Keter", ["106"] = "Keter", ["299"] = "Keter",
+    ["409"] = "Keter", ["457"] = "Keter", ["682"] = "Keter", ["938"] = "Keter", ["939"] = "Keter",
+    ["burning"] = "Keter", ["able"] = "Keter", ["old man"] = "Keter", ["lizard"] = "Keter",
+}
+
+local function classifySCP(model)
+    local n = string.lower(model.Name)
+    for key, class in pairs(SCP_CLASS) do
+        if string.find(n, key, 1, true) then
+            return class
+        end
+    end
+    return "Euclid" -- padrão se não reconhecer
+end
+
+local scpEspObjects = {} -- [Instance] = {gui, label, part, class}
+
+local function isLikelySCP(inst)
+    if not inst or not inst.Parent then return false end
+    if inst:IsA("Model") or inst:IsA("Folder") then
+        local n = string.lower(inst.Name)
+        for _, kw in ipairs(SCP_KEYWORDS) do
+            if string.find(n, string.lower(kw), 1, true) then
+                return true
+            end
+        end
+        if inst:GetAttribute("SCP") or inst:GetAttribute("IsSCP") or inst:FindFirstChild("SCP") then
+            return true
+        end
+    end
+    return false
+end
+
+local function getSCPPart(model)
+    if not model then return nil end
+    return model:FindFirstChild("Head")
+        or model:FindFirstChild("HumanoidRootPart")
+        or model.PrimaryPart
+        or model:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function removeSCPEsp(model)
+    local o = scpEspObjects[model]
+    if o then
+        pcall(function() o.gui:Destroy() end)
+        scpEspObjects[model] = nil
+    end
+end
+
+local function createSCPEsp(model)
+    if scpEspObjects[model] then return end
+    local part = getSCPPart(model)
+    if not part then return end
+    local class = classifySCP(model)
+    local color = class == "Safe" and Color3.fromRGB(80, 220, 120)
+        or class == "Keter" and Color3.fromRGB(255, 70, 70)
+        or Color3.fromRGB(255, 200, 60) -- Euclid
+    local bb = new("BillboardGui", {
+        Name = "FelixSCPEsp", AlwaysOnTop = true, Size = UDim2.fromOffset(180, 44),
+        StudsOffset = Vector3.new(0, 3.5, 0), ResetOnSpawn = false, Enabled = false,
+    }, gui)
+    local lbl = new("TextLabel", {
+        BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Font = Enum.Font.GothamBold,
+        TextSize = 14, TextColor3 = color, TextStrokeTransparency = 0.3,
+        Text = model.Name,
+    }, bb)
+    scpEspObjects[model] = {gui = bb, label = lbl, part = part, class = class}
+end
+
+local function scanSCPs()
+    for model in pairs(scpEspObjects) do
+        if not model.Parent then removeSCPEsp(model) end
+    end
+    local roots = {workspace}
+    for _, name in ipairs({"SCPs", "SCP", "Anomalies", "Entities", "Mobs", "NPCs"}) do
+        local f = workspace:FindFirstChild(name)
+        if f then table.insert(roots, f) end
+    end
+    for _, root in ipairs(roots) do
+        for _, inst in ipairs(root:GetChildren()) do
+            if isLikelySCP(inst) then
+                createSCPEsp(inst)
+            end
+            if inst:IsA("Folder") or inst:IsA("Model") then
+                for _, child in ipairs(inst:GetChildren()) do
+                    if isLikelySCP(child) then
+                        createSCPEsp(child)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function teleportToSCP(model)
+    local part = getSCPPart(model)
+    local me = getRoot()
+    if part and me then
+        me.CFrame = part.CFrame * CFrame.new(0, 3, 6)
+    end
+end
+
+local function getSCPsByClass(className)
+    local list = {}
+    for model, o in pairs(scpEspObjects) do
+        if model.Parent and o.class == className then
+            table.insert(list, model)
+        end
+    end
+    table.sort(list, function(a, b) return a.Name < b.Name end)
+    return list
+end
+
+----------------------------------------------------------------
+-- Anti-infecção (409, 008, 016, 299, etc.)
+----------------------------------------------------------------
+local INFECT_KEYWORDS = {
+    "infect", "infection", "infected", "plague", "virus", "contag",
+    "409", "008", "016", "299", "crystal", "zombie", "spore",
+    "daybreak", "disease", "sickness", "status", "debuff",
+}
+
+local function nameLooksInfect(n)
+    n = string.lower(tostring(n or ""))
+    for _, kw in ipairs(INFECT_KEYWORDS) do
+        if string.find(n, kw, 1, true) then return true end
+    end
+    return false
+end
+
+local function clearInfection()
+    local char = getChar()
+    if not char then return end
+
+    -- remove efeitos/objetos de infecção no personagem
+    for _, inst in ipairs(char:GetDescendants()) do
+        local n = inst.Name
+        if nameLooksInfect(n) then
+            -- não destrói partes essenciais do corpo
+            if not inst:IsA("BasePart") and not inst:IsA("Humanoid")
+                and not inst:IsA("Shirt") and not inst:IsA("Pants")
+                and not inst:IsA("BodyColors") and not inst:IsA("CharacterMesh") then
+                pcall(function() inst:Destroy() end)
+            end
+        end
+    end
+
+    -- atributos de infecção
+    pcall(function()
+        for attr, _ in pairs(char:GetAttributes()) do
+            if nameLooksInfect(attr) then
+                char:SetAttribute(attr, nil)
+            end
+        end
+    end)
+
+    -- valores no humanoid / player
+    local hum = getHum()
+    if hum then
+        pcall(function()
+            for attr, _ in pairs(hum:GetAttributes()) do
+                if nameLooksInfect(attr) then
+                    hum:SetAttribute(attr, nil)
+                end
+            end
+        end)
+        -- alguns jogos usam BoolValues / NumberValues
+        for _, v in ipairs(hum:GetChildren()) do
+            if nameLooksInfect(v.Name) then
+                pcall(function() v:Destroy() end)
+            end
+        end
+    end
+
+    -- PlayerGui / efeitos visuais de infecção
+    pcall(function()
+        for _, g in ipairs(LP.PlayerGui:GetChildren()) do
+            if nameLooksInfect(g.Name) then
+                g.Enabled = false
+                pcall(function() g:Destroy() end)
+            end
+        end
+    end)
+
+    -- pastas comuns de status / infecção no character
+    for _, folderName in ipairs({"Status", "Statuses", "Effects", "Buffs", "Debuffs", "Infection"}) do
+        local f = char:FindFirstChild(folderName)
+        if f then
+            for _, child in ipairs(f:GetChildren()) do
+                if nameLooksInfect(folderName) or nameLooksInfect(child.Name) then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while gui.Parent do
+        if S.scpEsp or S.scpAimbot or S.scpLifeMode ~= "off" then
+            pcall(scanSCPs)
+        end
+        if S.antiInfect then
+            pcall(clearInfection)
+        end
+        task.wait(S.antiInfect and 0.35 or 1.2)
+    end
+end)
+
+----------------------------------------------------------------
 -- FLY
 ----------------------------------------------------------------
 local flyUI -- setter do toggle (definido depois)
@@ -288,7 +523,7 @@ connect(RunService.Heartbeat, function(dt)
 
     local h, root = getHum(), getRoot()
 
-    -- ESP
+    -- ESP jogadores
     local myPos = root and root.Position
     for p, o in pairs(espObjects) do
         local ch = p.Character
@@ -300,6 +535,59 @@ connect(RunService.Heartbeat, function(dt)
         else
             o.gui.Enabled = false
         end
+    end
+
+    -- ESP SCPs
+    for model, o in pairs(scpEspObjects) do
+        local part = o.part and o.part.Parent and o.part or getSCPPart(model)
+        o.part = part
+        if S.scpEsp and part and myPos then
+            o.gui.Adornee = part
+            o.gui.Enabled = true
+            local dist = math.floor((part.Position - myPos).Magnitude)
+            local cls = o.class or "Euclid"
+            o.label.Text = string.format("[%s] %s\n[%d m]", cls, model.Name, dist)
+            o.label.TextColor3 = cls == "Safe" and Color3.fromRGB(80, 220, 120)
+                or cls == "Keter" and Color3.fromRGB(255, 70, 70)
+                or Color3.fromRGB(255, 200, 60)
+        else
+            o.gui.Enabled = false
+        end
+    end
+
+    -- Proteção de vida SÓ contra SCPs (jogadores matam normal)
+    if S.scpLifeMode ~= "off" and h and root then
+        local nearSCP = false
+        for model, o in pairs(scpEspObjects) do
+            local part = o.part and o.part.Parent and o.part or getSCPPart(model)
+            if part then
+                local d = (part.Position - root.Position).Magnitude
+                if d < 45 then -- perto de um SCP = considera dano de SCP
+                    nearSCP = true
+                    break
+                end
+            end
+        end
+        if nearSCP then
+            if S.scpLifeMode == "super" then
+                -- Super vida: cura total instantânea (mais óbvio)
+                if h.Health < h.MaxHealth then
+                    h.Health = h.MaxHealth
+                end
+                pcall(function()
+                    if h:GetState() == Enum.HumanoidStateType.Dead then
+                        h:ChangeState(Enum.HumanoidStateType.Running)
+                        h.Health = h.MaxHealth
+                    end
+                end)
+            elseif S.scpLifeMode == "melhor" then
+                -- Melhor vida: regenera devagar (parece natural, menos suspeito)
+                if h.Health < h.MaxHealth and h.Health > 0 then
+                    h.Health = math.min(h.MaxHealth, h.Health + (18 * dt)) -- ~18 HP/s
+                end
+            end
+        end
+        -- longe de SCP: não mexe na vida → jogadores matam normal
     end
 
     if h then
@@ -338,32 +626,31 @@ connect(RunService.Heartbeat, function(dt)
     local cam = workspace.CurrentCamera
     if S.fovOn and cam then cam.FieldOfView = S.fov end
 
-    -- AIMBOT (SCP) — centrado na tela (não segue toque/mouse)
+    -- AIMBOT — centrado na tela (jogadores + SCPs se ativado)
     if S.aimbot and cam then
         local vp = cam.ViewportSize
         local center = Vector2.new(vp.X / 2, vp.Y / 2)
-        local fovRadius = S.aimbotFov * 2.8 -- 1–100 → ~3 a 280 px
+        local fovRadius = S.aimbotFov * 2.8
         local bestScore, bestPart
 
+        -- jogadores
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LP then
                 local ch = p.Character
                 local hum = ch and ch:FindFirstChildOfClass("Humanoid")
                 local head = ch and ch:FindFirstChild("Head")
-                local root = ch and ch:FindFirstChild("HumanoidRootPart")
-                local part = head or root
+                local pRoot = ch and ch:FindFirstChild("HumanoidRootPart")
+                local part = head or pRoot
                 if hum and hum.Health > 0 and part then
-                    -- predição simples pelo velocity
                     local predPos = part.Position
-                    if root then
-                        local vel = root.AssemblyLinearVelocity
+                    if pRoot then
+                        local vel = pRoot.AssemblyLinearVelocity
                         predPos = predPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
                     end
                     local screenPos, onScreen = cam:WorldToViewportPoint(predPos)
                     if onScreen and screenPos.Z > 0 then
                         local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
                         if screenDist <= fovRadius then
-                            -- score: prioriza mais perto do centro e mais perto em 3D
                             local worldDist = (part.Position - cam.CFrame.Position).Magnitude
                             local score = screenDist + worldDist * 0.08
                             if not bestScore or score < bestScore then
@@ -376,15 +663,42 @@ connect(RunService.Heartbeat, function(dt)
             end
         end
 
+        -- SCPs (se opção ligada)
+        if S.scpAimbot then
+            for model, o in pairs(scpEspObjects) do
+                local part = o.part and o.part.Parent and o.part or getSCPPart(model)
+                if part then
+                    local predPos = part.Position
+                    pcall(function()
+                        local vel = part.AssemblyLinearVelocity
+                        predPos = predPos + Vector3.new(vel.X, 0, vel.Z) * 0.1
+                    end)
+                    local screenPos, onScreen = cam:WorldToViewportPoint(predPos)
+                    if onScreen and screenPos.Z > 0 then
+                        local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        if screenDist <= fovRadius then
+                            local worldDist = (part.Position - cam.CFrame.Position).Magnitude
+                            local score = screenDist + worldDist * 0.06 -- prioriza um pouco mais SCP
+                            if not bestScore or score < bestScore then
+                                bestScore = score
+                                bestPart = part
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
         if bestPart then
             local targetPos = bestPart.Position
-            local root = bestPart.Parent and bestPart.Parent:FindFirstChild("HumanoidRootPart")
-            if root then
-                local vel = root.AssemblyLinearVelocity
-                targetPos = targetPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
-            end
+            pcall(function()
+                local r = bestPart.Parent and bestPart.Parent:FindFirstChild("HumanoidRootPart")
+                if r then
+                    local vel = r.AssemblyLinearVelocity
+                    targetPos = targetPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
+                end
+            end)
             local targetCF = CFrame.new(cam.CFrame.Position, targetPos)
-            -- Sensibilidade 1–10 → alpha (maior = trava mais rápido)
             local alpha = math.clamp((S.aimbotSens / 10) * 0.95, 0.06, 1)
             cam.CFrame = cam.CFrame:Lerp(targetCF, alpha)
         end
@@ -409,9 +723,10 @@ connect(UserInputService.JumpRequest, function()
     end
 end)
 
-connect(LP.CharacterAdded, function()
+connect(LP.CharacterAdded, function(char)
     stopFly()
     if flyUI then flyUI(false) end
+    -- proteção de vida é aplicada no Heartbeat (só perto de SCPs)
 end)
 
 connect(LP.Idled, function()
@@ -984,6 +1299,188 @@ if chosenGame == "scp" then
             crossH.BackgroundColor3 = S.aimbotColor
             crossV.BackgroundColor3 = S.aimbotColor
         end
+    end)
+
+    ----------------------------------------------------------------
+    -- ABA: SCP TROLL
+    ----------------------------------------------------------------
+    local pTroll = addTab("SCP Troll")
+    section(pTroll, "ESP de SCPs")
+    infoLabel(pTroll, "Mostra nome + distância de SCPs detectados no mapa (096, 173, 049, 106, 682, etc.).")
+    toggleRow(pTroll, "ESP SCP (todos)", false, function(v) S.scpEsp = v end)
+
+    section(pTroll, "Aimbot em SCPs")
+    infoLabel(pTroll, "Quando o AIMBOT estiver ligado, também mira em SCPs (além de jogadores).")
+    toggleRow(pTroll, "Aimbot mira em SCPs", true, function(v) S.scpAimbot = v end)
+
+    section(pTroll, "Config vida (só SCPs)")
+    infoLabel(pTroll, "Só protege de SCPs (quando um SCP está perto). Jogadores matam normal. Kills 100% server-side ainda podem passar.")
+
+    local lifeStatus = new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium, Text = "Modo atual: Desligado",
+        TextSize = 12, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = nextOrder(),
+    }, pTroll)
+
+    local function setLifeMode(mode)
+        S.scpLifeMode = mode
+        if mode == "super" then
+            lifeStatus.Text = "Modo atual: Super vida"
+            lifeStatus.TextColor3 = C.danger
+        elseif mode == "melhor" then
+            lifeStatus.Text = "Modo atual: Melhor vida"
+            lifeStatus.TextColor3 = C.on
+        else
+            lifeStatus.Text = "Modo atual: Desligado"
+            lifeStatus.TextColor3 = C.sub
+        end
+    end
+
+    buttonRow(pTroll, "Super vida", function()
+        setLifeMode(S.scpLifeMode == "super" and "off" or "super")
+    end, C.danger)
+    infoLabel(pTroll, "Super vida: cura total na hora perto de SCP. Meio ruim — podem identificar você como hacker porque você não morre por nada do SCP.")
+
+    buttonRow(pTroll, "Melhor vida", function()
+        setLifeMode(S.scpLifeMode == "melhor" and "off" or "melhor")
+    end, C.on)
+    infoLabel(pTroll, "Melhor vida: regenera devagar perto de SCP. A melhor opção — parece mais natural e dificilmente vão achar que você usa hack.")
+
+    buttonRow(pTroll, "Desligar vida", function()
+        setLifeMode("off")
+    end)
+    buttonRow(pTroll, "Curar agora (100% vida)", function()
+        local hum = getHum()
+        if hum then
+            hum.MaxHealth = math.max(hum.MaxHealth, 100)
+            hum.Health = hum.MaxHealth
+        end
+    end, C.accent)
+    buttonRow(pTroll, "Rescanear SCPs agora", function()
+        pcall(scanSCPs)
+        if refreshSCPLists then refreshSCPLists() end
+    end)
+
+    section(pTroll, "Anti-infecção")
+    infoLabel(pTroll, "Tenta limpar infecções de SCP-409, 008, 016, 299 e efeitos parecidos no personagem. Não é 100% se o servidor forçar a infecção.")
+    toggleRow(pTroll, "Anti-infecção (409 / 008 / etc.)", false, function(v)
+        S.antiInfect = v
+        if v then pcall(clearInfection) end
+    end)
+    buttonRow(pTroll, "Limpar infecção agora", function()
+        pcall(clearInfection)
+    end, C.on)
+
+    ----------------------------------------------------------------
+    -- Teleporte por categoria (Safe / Euclid / Keter)
+    ----------------------------------------------------------------
+    section(pTroll, "Teleporte por categoria")
+    infoLabel(pTroll, "Lista os SCPs detectados separados por classe. Toque em Ir para teleportar até eles. (Apollyon não incluso)")
+
+    local listFrames = {}
+    local refreshSCPLists
+
+    local function makeClassSection(className, accentColor)
+        section(pTroll, className)
+        -- botão teleportar pro mais próximo da classe
+        buttonRow(pTroll, "Ir ao " .. className .. " mais próximo", function()
+            pcall(scanSCPs)
+            local list = getSCPsByClass(className)
+            local me = getRoot()
+            if not me or #list == 0 then return end
+            local best, bestD
+            for _, model in ipairs(list) do
+                local part = getSCPPart(model)
+                if part then
+                    local d = (part.Position - me.Position).Magnitude
+                    if not bestD or d < bestD then
+                        best, bestD = model, d
+                    end
+                end
+            end
+            if best then teleportToSCP(best) end
+        end, accentColor)
+
+        local frame = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, LayoutOrder = nextOrder(),
+        }, pTroll)
+        new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, frame)
+        listFrames[className] = frame
+    end
+
+    makeClassSection("Safe", Color3.fromRGB(60, 180, 100))
+    makeClassSection("Euclid", Color3.fromRGB(220, 170, 40))
+    makeClassSection("Keter", Color3.fromRGB(200, 50, 60))
+
+    refreshSCPLists = function()
+        pcall(scanSCPs)
+        for className, frame in pairs(listFrames) do
+            for _, c in ipairs(frame:GetChildren()) do
+                if c:IsA("Frame") or c:IsA("TextLabel") then c:Destroy() end
+            end
+            local list = getSCPsByClass(className)
+            if #list == 0 then
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+                    Font = Enum.Font.Gotham, Text = "Nenhum " .. className .. " detectado.",
+                    TextSize = 12, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
+                    LayoutOrder = 1,
+                }, frame)
+            else
+                for i, model in ipairs(list) do
+                    local r = new("Frame", {
+                        Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.row,
+                        BorderSizePixel = 0, LayoutOrder = i,
+                    }, frame)
+                    round(r, 6)
+                    local dist = "--"
+                    local part = getSCPPart(model)
+                    local me = getRoot()
+                    if part and me then
+                        dist = math.floor((part.Position - me.Position).Magnitude) .. " m"
+                    end
+                    new("TextLabel", {
+                        BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 0),
+                        Size = UDim2.new(1, -78, 1, 0), Font = Enum.Font.GothamMedium,
+                        Text = model.Name .. "  (" .. dist .. ")", TextSize = 12,
+                        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+                        TextTruncate = Enum.TextTruncate.AtEnd,
+                    }, r)
+                    local go = new("TextButton", {
+                        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+                        Size = UDim2.fromOffset(48, 22), BackgroundColor3 = C.on,
+                        Font = Enum.Font.GothamBold, Text = "Ir", TextSize = 12,
+                        TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
+                    }, r)
+                    round(go, 5)
+                    go.Activated:Connect(function()
+                        teleportToSCP(model)
+                    end)
+                end
+            end
+        end
+    end
+
+    buttonRow(pTroll, "Atualizar listas de teleporte", function()
+        refreshSCPLists()
+    end, C.accent)
+
+    -- atualiza listas periodicamente enquanto o menu existir
+    task.spawn(function()
+        while gui.Parent do
+            if currentTab == "SCP Troll" then
+                pcall(refreshSCPLists)
+            end
+            task.wait(2.5)
+        end
+    end)
+
+    -- primeira carga
+    task.delay(0.5, function()
+        pcall(scanSCPs)
+        pcall(refreshSCPLists)
     end)
 
     selectTab("SCP")
