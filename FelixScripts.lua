@@ -3,7 +3,7 @@
     Jogos: Brookhaven RP (menu completo) e SCP AIMBOT (ESP + FPS + Aimbot)
     Ao executar, aparece "Usar no:" para escolher o jogo.
     Brookhaven: Jogador, Sistema, Veículos, Casas, Jogadores, Câmera, Locais, Música
-    SCP AIMBOT: ESP, FPS boost, Aimbot (ligar/desligar, tamanho FOV, invisível)
+    SCP AIMBOT: ESP, FPS boost, Aimbot profissional (centro fixo, ponto+cruz, predição, cor, sensibilidade)
     - Botão "F" abre/fecha o menu (arrastável)
     - Botão X (no topo do menu) apaga o script por completo
 ]]
@@ -338,33 +338,54 @@ connect(RunService.Heartbeat, function(dt)
     local cam = workspace.CurrentCamera
     if S.fovOn and cam then cam.FieldOfView = S.fov end
 
-    -- AIMBOT (SCP)
+    -- AIMBOT (SCP) — centrado na tela (não segue toque/mouse)
     if S.aimbot and cam then
-        local mousePos = UserInputService:GetMouseLocation()
-        local fovRadius = S.aimbotFov * 2.5 -- escala 1-100 → pixels (~2.5 a 250)
-        local closest, closestDist, closestPart
+        local vp = cam.ViewportSize
+        local center = Vector2.new(vp.X / 2, vp.Y / 2)
+        local fovRadius = S.aimbotFov * 2.8 -- 1–100 → ~3 a 280 px
+        local bestScore, bestPart
+
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LP then
                 local ch = p.Character
                 local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-                local head = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
-                if hum and hum.Health > 0 and head then
-                    local screenPos, onScreen = cam:WorldToViewportPoint(head.Position)
+                local head = ch and ch:FindFirstChild("Head")
+                local root = ch and ch:FindFirstChild("HumanoidRootPart")
+                local part = head or root
+                if hum and hum.Health > 0 and part then
+                    -- predição simples pelo velocity
+                    local predPos = part.Position
+                    if root then
+                        local vel = root.AssemblyLinearVelocity
+                        predPos = predPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
+                    end
+                    local screenPos, onScreen = cam:WorldToViewportPoint(predPos)
                     if onScreen and screenPos.Z > 0 then
-                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
-                        if dist <= fovRadius and (not closestDist or dist < closestDist) then
-                            closest = p
-                            closestDist = dist
-                            closestPart = head
+                        local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        if screenDist <= fovRadius then
+                            -- score: prioriza mais perto do centro e mais perto em 3D
+                            local worldDist = (part.Position - cam.CFrame.Position).Magnitude
+                            local score = screenDist + worldDist * 0.08
+                            if not bestScore or score < bestScore then
+                                bestScore = score
+                                bestPart = part
+                            end
                         end
                     end
                 end
             end
         end
-        if closestPart then
-            local targetCF = CFrame.new(cam.CFrame.Position, closestPart.Position)
-            -- Sensibilidade 1 a 10: quanto maior, mais rápido trava (alpha maior)
-            local alpha = math.clamp(S.aimbotSens / 10, 0.08, 1)
+
+        if bestPart then
+            local targetPos = bestPart.Position
+            local root = bestPart.Parent and bestPart.Parent:FindFirstChild("HumanoidRootPart")
+            if root then
+                local vel = root.AssemblyLinearVelocity
+                targetPos = targetPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
+            end
+            local targetCF = CFrame.new(cam.CFrame.Position, targetPos)
+            -- Sensibilidade 1–10 → alpha (maior = trava mais rápido)
+            local alpha = math.clamp((S.aimbotSens / 10) * 0.95, 0.06, 1)
             cam.CFrame = cam.CFrame:Lerp(targetCF, alpha)
         end
     end
@@ -862,7 +883,7 @@ if chosenGame == "scp" then
     end)
 
     section(pScp, "AIMBOT")
-    infoLabel(pScp, "Liga/desliga o aimbot. Tamanho 1–100, sensibilidade 1–10 e escolha a cor do círculo. Use “Deixa invisível?” para esconder o círculo.")
+    infoLabel(pScp, "Círculo fixo no centro da tela (não segue o dedo). Mira na cabeça com predição. Use “Deixa invisível?” para esconder tudo.")
     toggleRow(pScp, "AIMBOT (ligar/desligar)", false, function(v) S.aimbot = v end)
     toggleRow(pScp, "Deixa invisível?", true, function(v) S.aimbotInvis = v end)
     stepperRow(pScp, "Tamanho (FOV)", 1, 100, 1, S.aimbotFov, function(v) S.aimbotFov = v end)
@@ -870,23 +891,57 @@ if chosenGame == "scp" then
         return string.format("%.1f", v)
     end)
 
-    -- Círculo de FOV (só aparece se NÃO estiver invisível)
+    -- Círculo de FOV + centro (sempre no meio da tela — NÃO segue toque)
     local fovCircle = new("Frame", {
         Name = "AimbotFovCircle",
         AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(S.aimbotFov * 5, S.aimbotFov * 5),
+        Size = UDim2.fromOffset(S.aimbotFov * 5.6, S.aimbotFov * 5.6),
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
         Visible = false,
         ZIndex = 10,
     }, gui)
     local fovStroke = new("UIStroke", {
-        Thickness = 1.5,
+        Thickness = 1.6,
         Color = S.aimbotColor,
-        Transparency = 0.3,
+        Transparency = 0.25,
     }, fovCircle)
     new("UICorner", {CornerRadius = UDim.new(1, 0)}, fovCircle)
+
+    -- Ponto central (meio do círculo)
+    local centerDot = new("Frame", {
+        Name = "AimbotCenter",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(6, 6),
+        BackgroundColor3 = S.aimbotColor,
+        BackgroundTransparency = 0.1,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    }, fovCircle)
+    new("UICorner", {CornerRadius = UDim.new(1, 0)}, centerDot)
+    local centerStroke = new("UIStroke", {
+        Thickness = 1,
+        Color = Color3.new(1, 1, 1),
+        Transparency = 0.4,
+    }, centerDot)
+
+    -- Cruz fina no centro (mais profissional)
+    local function makeCrossLine(w, h)
+        local f = new("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(w, h),
+            BackgroundColor3 = S.aimbotColor,
+            BackgroundTransparency = 0.15,
+            BorderSizePixel = 0,
+            ZIndex = 11,
+        }, fovCircle)
+        return f
+    end
+    local crossH = makeCrossLine(14, 1)
+    local crossV = makeCrossLine(1, 14)
 
     -- Cores do AIMBOT (botões)
     section(pScp, "Cor do AIMBOT")
@@ -907,6 +962,9 @@ if chosenGame == "scp" then
                 fn = function()
                     S.aimbotColor = d.color
                     fovStroke.Color = d.color
+                    centerDot.BackgroundColor3 = d.color
+                    crossH.BackgroundColor3 = d.color
+                    crossV.BackgroundColor3 = d.color
                 end,
             })
         end
@@ -917,11 +975,14 @@ if chosenGame == "scp" then
         local show = S.aimbot and not S.aimbotInvis
         fovCircle.Visible = show
         if show then
-            local size = math.max(8, S.aimbotFov * 5) -- escala visual 1-100
+            local size = math.max(12, S.aimbotFov * 5.6)
             fovCircle.Size = UDim2.fromOffset(size, size)
+            -- SEMPRE no centro da tela (não segue mouse/toque)
+            fovCircle.Position = UDim2.fromScale(0.5, 0.5)
             fovStroke.Color = S.aimbotColor
-            local mouse = UserInputService:GetMouseLocation()
-            fovCircle.Position = UDim2.fromOffset(mouse.X, mouse.Y)
+            centerDot.BackgroundColor3 = S.aimbotColor
+            crossH.BackgroundColor3 = S.aimbotColor
+            crossV.BackgroundColor3 = S.aimbotColor
         end
     end)
 
