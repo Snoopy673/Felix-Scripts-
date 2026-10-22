@@ -2,7 +2,7 @@
     Felix Scripts | Super pro   (v5)
     Jogos: Brookhaven RP (menu completo) e SCP AIMBOT (ESP + FPS + Aimbot)
     Ao executar, aparece "Usar no:" para escolher o jogo.
-    Brookhaven: Jogador, Sistema, Veículos, Casas, Jogadores, Câmera, Locais, Música
+    Brookhaven: Jogador, Sistema, Veículos (fly/trazer), Casas, Jogadores, Troll (ônibus/sofá), Câmera, Locais, Música, configs
     SCP AIMBOT: ESP, FPS, Aimbot, SCP Troll, Jogadores (vida PvP, combate auto-tiro, wallbang)
     - Botão "F" abre/fecha o menu (arrastável)
     - Botão X (no topo do menu) apaga o script por completo
@@ -194,6 +194,7 @@ local S = {
     fly = false, flySpeed = 60,
     esp = false,
     turbo = false, turboBoost = 6, turboMax = 200,
+    vehFly = false, vehFlySpeed = 80,
     lunar = false,
     espOnlySel = false,
     fovOn = false, fov = 70,
@@ -201,12 +202,20 @@ local S = {
     antiAfk = false,
     fullbright = false,
     fpsBoost = false,
+    trollActive = false,
+    trollMethod = "onibus", -- "onibus" | "sofa" | "puxar" | "lag"
+    -- Proteção Brookhaven
+    antiSit = false,
+    antiVehicle = false,
+    antiFling = false,
+    protectAll = false,
     -- Aimbot (SCP)
     aimbot = false,
     aimbotFov = 80,           -- tamanho do FOV (1 a 100)
     aimbotInvis = true,       -- deixa invisível? (sem círculo visual)
     aimbotSens = 3,           -- sensibilidade 1 a 10 (maior = mais rápido/travado)
     aimbotColor = Color3.fromRGB(140, 80, 255), -- cor do círculo do AIMBOT
+    aimbotSticky = true,      -- trava no alvo dentro do círculo e não solta
     -- SCP Troll
     scpEsp = false,
     scpAimbot = true,         -- aimbot também mira em SCPs
@@ -740,86 +749,165 @@ connect(RunService.Heartbeat, function(dt)
         end
     end
 
+    -- Fly de veículo
+    if S.vehFly and h and h.SeatPart then
+        local seat = h.SeatPart
+        local body = seat.AssemblyRootPart or seat
+        local look = Camera.CFrame.LookVector
+        local move = h.MoveDirection
+        local vel = Vector3.zero
+        if move.Magnitude > 0.05 then
+            vel = move * S.vehFlySpeed + Vector3.new(0, look.Y * S.vehFlySpeed, 0)
+        else
+            vel = Vector3.new(0, look.Y * (UserInputService:IsKeyDown(Enum.KeyCode.Space) and S.vehFlySpeed or 0), 0)
+        end
+        -- WASD já vem no MoveDirection; Space sobe um pouco
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            vel = vel + Vector3.new(0, S.vehFlySpeed * 0.8, 0)
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+            vel = vel - Vector3.new(0, S.vehFlySpeed * 0.8, 0)
+        end
+        body.AssemblyLinearVelocity = vel
+        pcall(function() body.AssemblyAngularVelocity = Vector3.zero end)
+    end
+
     -- Câmera (FOV personalizado)
     local cam = workspace.CurrentCamera
     if S.fovOn and cam then cam.FieldOfView = S.fov end
 
-    -- AIMBOT — centrado na tela (jogadores + SCPs se ativado)
+    -- AIMBOT sticky: entrou no círculo → trava e segue sem soltar
+    if not _G._felixAimLock then _G._felixAimLock = nil end -- {kind="player"/"scp", ref=Player|Model, part=BasePart}
     if S.aimbot and cam then
         local vp = cam.ViewportSize
         local center = Vector2.new(vp.X / 2, vp.Y / 2)
         local fovRadius = S.aimbotFov * 2.8
-        local bestScore, bestPart
+        local stickyRadius = fovRadius * 2.2 -- só solta se sair bem longe do FOV
+        local lock = _G._felixAimLock
+        local aimPart = nil
 
-        -- jogadores
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LP then
+        local function stillValid(lk)
+            if not lk then return false end
+            if lk.kind == "player" then
+                local p = lk.ref
+                if not p or not p.Parent then return false end
                 local ch = p.Character
                 local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-                local head = ch and ch:FindFirstChild("Head")
-                local pRoot = ch and ch:FindFirstChild("HumanoidRootPart")
-                local part = head or pRoot
-                if hum and hum.Health > 0 and part then
-                    local predPos = part.Position
-                    if pRoot then
-                        local vel = pRoot.AssemblyLinearVelocity
-                        predPos = predPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
-                    end
-                    local screenPos, onScreen = cam:WorldToViewportPoint(predPos)
-                    if onScreen and screenPos.Z > 0 then
-                        local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                        if screenDist <= fovRadius then
-                            local worldDist = (part.Position - cam.CFrame.Position).Magnitude
-                            local score = screenDist + worldDist * 0.08
-                            if not bestScore or score < bestScore then
-                                bestScore = score
-                                bestPart = part
-                            end
-                        end
-                    end
-                end
+                local head = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
+                if not hum or hum.Health <= 0 or not head then return false end
+                lk.part = head
+                return true
+            elseif lk.kind == "scp" then
+                local model = lk.ref
+                if not model or not model.Parent then return false end
+                local part = getSCPPart(model)
+                if not part then return false end
+                lk.part = part
+                return true
             end
+            return false
         end
 
-        -- SCPs (se opção ligada)
-        if S.scpAimbot then
-            for model, o in pairs(scpEspObjects) do
-                local part = o.part and o.part.Parent and o.part or getSCPPart(model)
-                if part then
-                    local predPos = part.Position
-                    pcall(function()
-                        local vel = part.AssemblyLinearVelocity
-                        predPos = predPos + Vector3.new(vel.X, 0, vel.Z) * 0.1
-                    end)
-                    local screenPos, onScreen = cam:WorldToViewportPoint(predPos)
-                    if onScreen and screenPos.Z > 0 then
-                        local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                        if screenDist <= fovRadius then
-                            local worldDist = (part.Position - cam.CFrame.Position).Magnitude
-                            local score = screenDist + worldDist * 0.06 -- prioriza um pouco mais SCP
-                            if not bestScore or score < bestScore then
-                                bestScore = score
-                                bestPart = part
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        if bestPart then
-            local targetPos = bestPart.Position
+        local function screenDistTo(part)
+            local predPos = part.Position
             pcall(function()
-                local r = bestPart.Parent and bestPart.Parent:FindFirstChild("HumanoidRootPart")
+                local r = part.Parent and part.Parent:FindFirstChild("HumanoidRootPart")
+                if r then
+                    local vel = r.AssemblyLinearVelocity
+                    predPos = predPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
+                end
+            end)
+            local sp, onScreen = cam:WorldToViewportPoint(predPos)
+            if not onScreen or sp.Z <= 0 then
+                return math.huge, predPos
+            end
+            return (Vector2.new(sp.X, sp.Y) - center).Magnitude, predPos
+        end
+
+        -- sticky: mantém o alvo atual
+        if S.aimbotSticky and lock and stillValid(lock) then
+            local sd = screenDistTo(lock.part)
+            if sd <= stickyRadius then
+                aimPart = lock.part
+            else
+                _G._felixAimLock = nil
+                lock = nil
+            end
+        else
+            if lock and not stillValid(lock) then
+                _G._felixAimLock = nil
+                lock = nil
+            end
+        end
+
+        -- sem lock: pega o melhor dentro do círculo
+        if not aimPart then
+            local bestScore, bestPart, bestLock
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP then
+                    local ch = p.Character
+                    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                    local head = ch and ch:FindFirstChild("Head")
+                    local pRoot = ch and ch:FindFirstChild("HumanoidRootPart")
+                    local part = head or pRoot
+                    if hum and hum.Health > 0 and part then
+                        local sd, predPos = screenDistTo(part)
+                        if sd <= fovRadius then
+                            local worldDist = (part.Position - cam.CFrame.Position).Magnitude
+                            local score = sd + worldDist * 0.08
+                            if not bestScore or score < bestScore then
+                                bestScore = score
+                                bestPart = part
+                                bestLock = {kind = "player", ref = p, part = part}
+                            end
+                        end
+                    end
+                end
+            end
+            if S.scpAimbot then
+                for model, o in pairs(scpEspObjects) do
+                    local part = o.part and o.part.Parent and o.part or getSCPPart(model)
+                    if part then
+                        local sd = screenDistTo(part)
+                        if sd <= fovRadius then
+                            local worldDist = (part.Position - cam.CFrame.Position).Magnitude
+                            local score = sd + worldDist * 0.06
+                            if not bestScore or score < bestScore then
+                                bestScore = score
+                                bestPart = part
+                                bestLock = {kind = "scp", ref = model, part = part}
+                            end
+                        end
+                    end
+                end
+            end
+            if bestPart then
+                aimPart = bestPart
+                if S.aimbotSticky then
+                    _G._felixAimLock = bestLock
+                end
+            end
+        end
+
+        if aimPart then
+            local targetPos = aimPart.Position
+            pcall(function()
+                local r = aimPart.Parent and aimPart.Parent:FindFirstChild("HumanoidRootPart")
                 if r then
                     local vel = r.AssemblyLinearVelocity
                     targetPos = targetPos + Vector3.new(vel.X, 0, vel.Z) * 0.12
                 end
             end)
             local targetCF = CFrame.new(cam.CFrame.Position, targetPos)
-            local alpha = math.clamp((S.aimbotSens / 10) * 0.95, 0.06, 1)
+            local alpha = math.clamp((S.aimbotSens / 10) * 0.95, 0.08, 1)
+            -- sticky: um pouco mais agressivo pra não perder
+            if S.aimbotSticky and _G._felixAimLock then
+                alpha = math.clamp(alpha + 0.15, 0.12, 1)
+            end
             cam.CFrame = cam.CFrame:Lerp(targetCF, alpha)
         end
+    else
+        _G._felixAimLock = nil
     end
 end)
 
@@ -829,6 +917,73 @@ connect(RunService.Stepped, function()
         if c then
             for _, part in ipairs(c:GetDescendants()) do
                 if part:IsA("BasePart") then part.CanCollide = false end
+            end
+        end
+    end
+
+    -- Proteção Brookhaven
+    local protect = S.protectAll or S.antiSit or S.antiVehicle or S.antiFling
+    if protect then
+        local h = getHum()
+        local c = getChar()
+        local root = getRoot()
+
+        -- anti-sit / proteção de veículos
+        if (S.protectAll or S.antiSit or S.antiVehicle) and h then
+            if h.Sit then
+                h.Sit = false
+                pcall(function() h:ChangeState(Enum.HumanoidStateType.Jumping) end)
+            end
+            if h.SeatPart then
+                pcall(function()
+                    h.Sit = false
+                    h.SeatPart = nil
+                    h:ChangeState(Enum.HumanoidStateType.Jumping)
+                end)
+            end
+        end
+
+        -- anti-fling: zera velocidades loucas
+        if (S.protectAll or S.antiFling) and c and root then
+            local lv = root.AssemblyLinearVelocity
+            local av = root.AssemblyAngularVelocity
+            if lv.Magnitude > 120 then
+                root.AssemblyLinearVelocity = Vector3.zero
+            end
+            if av.Magnitude > 50 then
+                root.AssemblyAngularVelocity = Vector3.zero
+            end
+            for _, part in ipairs(c:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local a = part.AssemblyAngularVelocity
+                    if a.Magnitude > 40 then
+                        part.AssemblyAngularVelocity = Vector3.zero
+                    end
+                end
+            end
+            -- remove BodyMovers suspeitos (fling tools)
+            for _, inst in ipairs(c:GetDescendants()) do
+                if inst:IsA("BodyAngularVelocity") or inst:IsA("BodyVelocity")
+                    or inst:IsA("BodyForce") or inst:IsA("AngularVelocity")
+                    or inst:IsA("LinearVelocity") then
+                    if inst.Name ~= "Felix_fly" and not (flyBV and inst == flyBV) then
+                        -- não remove o flyBV do script
+                        if not (S.fly and inst == flyBV) then
+                            pcall(function()
+                                if inst:IsA("BodyVelocity") and S.fly and flyBV and inst == flyBV then
+                                    return
+                                end
+                                -- só remove se for fling absurdo
+                                if inst:IsA("BodyAngularVelocity") then
+                                    local mv = inst.AngularVelocity or inst.MaxTorque
+                                    inst:Destroy()
+                                elseif inst:IsA("BodyVelocity") and inst ~= flyBV then
+                                    if inst.Velocity.Magnitude > 100 then inst:Destroy() end
+                                end
+                            end)
+                        end
+                    end
+                end
             end
         end
     end
@@ -876,12 +1031,149 @@ local function saveStore()
     end)
 end
 
+----------------------------------------------------------------
+-- Música GLOBAL (rádio / veículo / casa) — outros jogadores ouvem
+----------------------------------------------------------------
+local RADIO_NAMES = {
+    "boombox", "radio", "rádio", "speaker", "caixa", "som", "music",
+    "gramophone", "jbl", "bluetooth", "stereo", "tocador",
+}
+
+local function nameIsRadio(n)
+    n = string.lower(tostring(n or ""))
+    for _, kw in ipairs(RADIO_NAMES) do
+        if string.find(n, kw, 1, true) then return true end
+    end
+    return false
+end
+
+-- encontra rádio na mão / mochila
+local function findRadioTool()
+    local char = getChar()
+    local bag = LP:FindFirstChild("Backpack")
+    local places = {}
+    if char then table.insert(places, char) end
+    if bag then table.insert(places, bag) end
+    for _, parent in ipairs(places) do
+        for _, inst in ipairs(parent:GetChildren()) do
+            if inst:IsA("Tool") and nameIsRadio(inst.Name) then
+                return inst
+            end
+        end
+        -- às vezes o rádio é Model dentro do character
+        for _, inst in ipairs(parent:GetDescendants()) do
+            if (inst:IsA("Tool") or inst:IsA("Model")) and nameIsRadio(inst.Name) then
+                return inst
+            end
+        end
+    end
+    return nil
+end
+
+-- encontra veículo que o player está usando
+local function findMyVehicle()
+    local h = getHum()
+    if h and h.SeatPart then
+        local seat = h.SeatPart
+        local model = seat:FindFirstAncestorOfClass("Model")
+        if model and model ~= getChar() then return model end
+        return seat.AssemblyRootPart and seat.AssemblyRootPart.Parent or seat.Parent
+    end
+    -- fallback: veículo mais perto
+    local root = getRoot()
+    if not root then return nil end
+    local best, bestD
+    for _, m in ipairs(workspace:GetChildren()) do
+        if m:IsA("Model") and m ~= getChar() then
+            local hasSeat = m:FindFirstChildWhichIsA("VehicleSeat", true) or m:FindFirstChildWhichIsA("Seat", true)
+            if hasSeat then
+                local p = m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+                if p then
+                    local d = (p.Position - root.Position).Magnitude
+                    if d < 18 and (not bestD or d < bestD) then
+                        best, bestD = m, d
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- encontra rádio/caixa de som perto (casa)
+local function findNearbyHouseRadio(maxDist)
+    maxDist = maxDist or 40
+    local root = getRoot()
+    if not root then return nil end
+    local best, bestD
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        if (inst:IsA("Model") or inst:IsA("Tool") or inst:IsA("BasePart")) and nameIsRadio(inst.Name) then
+            local part = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                local d = (part.Position - root.Position).Magnitude
+                if d <= maxDist and (not bestD or d < bestD) then
+                    -- não pega o da mão
+                    if not (getChar() and inst:IsDescendantOf(getChar())) then
+                        best, bestD = inst, d
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- pega ou cria Sound no alvo (para todos ouvirem = parent no workspace/tool)
+local function getOrCreateSound(parent, soundName)
+    if not parent then return nil end
+    local s = parent:FindFirstChild(soundName)
+    if s and s:IsA("Sound") then return s end
+    -- reutiliza sound existente no rádio se houver
+    local existing = parent:FindFirstChildOfClass("Sound")
+    if existing then return existing end
+    for _, d in ipairs(parent:GetDescendants()) do
+        if d:IsA("Sound") then return d end
+    end
+    local sound = Instance.new("Sound")
+    sound.Name = soundName
+    sound.Volume = 0.6
+    sound.Looped = false
+    sound.RollOffMaxDistance = 120
+    sound.RollOffMinDistance = 10
+    sound.Parent = parent
+    return sound
+end
+
+local function resolveMusicTarget(key)
+    if key == "veiculo" then
+        local veh = findMyVehicle()
+        if veh then return veh, "veículo" end
+        return nil, "entre em um veículo"
+    elseif key == "casa" then
+        local radio = findNearbyHouseRadio(45)
+        if radio then return radio, "rádio da casa" end
+        return nil, "aproxime de um rádio/caixa na casa"
+    else -- geral = rádio na mão
+        local tool = findRadioTool()
+        if tool then return tool, "rádio na mão" end
+        -- fallback: rádio perto
+        local near = findNearbyHouseRadio(25)
+        if near then return near, "rádio próximo" end
+        return nil, "segure um rádio/boombox"
+    end
+end
+
 local channels = {}
 local function getChannel(key)
     if channels[key] then return channels[key] end
     local ch = {
-        sound = new("Sound", {Name = "Felix_" .. key, Volume = 0.5, Looped = false}, SoundService),
+        sound = nil, -- será no objeto global
+        localSound = new("Sound", {Name = "Felix_" .. key .. "_local", Volume = 0.5, Looped = false}, SoundService),
         statuses = {}, lists = {}, token = 0,
+        volume = 0.6,
+        looped = false,
+        lastId = nil,
+        lastTarget = nil,
     }
     channels[key] = ch
 
@@ -891,34 +1183,87 @@ local function getChannel(key)
     function ch.refresh()
         for _, fn in ipairs(ch.lists) do fn() end
     end
+
     function ch.play(id, name)
         local clean = tostring(id or ""):match("%d+")
         if not clean then ch.setStatus("ID inválido") return end
         ch.token = ch.token + 1
         local my = ch.token
-        ch.sound:Stop()
-        ch.sound.SoundId = "rbxassetid://" .. clean
-        ch.sound:Play()
-        ch.setStatus("Carregando...")
+        ch.lastId = clean
+
+        local target, where = resolveMusicTarget(key)
+        if not target then
+            -- fallback local (só você ouve) + aviso
+            ch.localSound:Stop()
+            ch.localSound.SoundId = "rbxassetid://" .. clean
+            ch.localSound.Volume = ch.volume
+            ch.localSound.Looped = ch.looped
+            ch.localSound:Play()
+            ch.sound = ch.localSound
+            ch.setStatus("Só você ouve — " .. (where or "sem alvo") .. " | ID " .. clean)
+            return
+        end
+
+        local sound = getOrCreateSound(target, "FelixGlobal_" .. key)
+        if not sound then
+            ch.setStatus("Falha ao criar som no alvo")
+            return
+        end
+
+        -- para som anterior no mesmo canal
+        if ch.sound and ch.sound ~= sound and ch.sound.Parent then
+            pcall(function() ch.sound:Stop() end)
+        end
+        ch.sound = sound
+        ch.lastTarget = target
+
+        pcall(function()
+            sound:Stop()
+            sound.SoundId = "rbxassetid://" .. clean
+            sound.Volume = ch.volume
+            sound.Looped = ch.looped
+            sound.RollOffMaxDistance = 150
+            sound.RollOffMinDistance = 12
+            sound.Playing = true
+            sound:Play()
+        end)
+
+        ch.setStatus("Tocando p/ todos (" .. where .. "): " .. (name or clean))
         task.spawn(function()
             local t = 0
-            while t < 6 and not ch.sound.IsLoaded and ch.token == my do
-                task.wait(0.2)
-                t = t + 0.2
+            while t < 6 and ch.token == my do
+                if sound.IsLoaded or sound.TimeLength > 0 then
+                    ch.setStatus("Tocando p/ todos (" .. where .. "): " .. (name or clean))
+                    return
+                end
+                task.wait(0.25)
+                t = t + 0.25
             end
-            if ch.token ~= my then return end
-            if ch.sound.IsLoaded then
-                ch.setStatus("Tocando: " .. (name or clean))
-            else
-                ch.setStatus("Não carregou (ID inválido ou áudio privado)")
+            if ch.token == my then
+                ch.setStatus("Enviado ao " .. where .. " (se não ouvir, ID privado ou anti-cheat)")
             end
         end)
     end
+
     function ch.stop()
         ch.token = ch.token + 1
-        ch.sound:Stop()
+        if ch.sound then pcall(function() ch.sound:Stop() end) end
+        if ch.localSound then pcall(function() ch.localSound:Stop() end) end
         ch.setStatus("Parado")
     end
+
+    function ch.setVolume(v)
+        ch.volume = v
+        if ch.sound then pcall(function() ch.sound.Volume = v end) end
+        if ch.localSound then ch.localSound.Volume = v end
+    end
+
+    function ch.setLoop(v)
+        ch.looped = v
+        if ch.sound then pcall(function() ch.sound.Looped = v end) end
+        if ch.localSound then ch.localSound.Looped = v end
+    end
+
     return ch
 end
 
@@ -1165,6 +1510,16 @@ local function musicSection(page, key, title)
     local ch = getChannel(key)
     section(page, title)
 
+    local hint = "geral"
+    if key == "veiculo" then
+        hint = "Entra no carro/moto e dá Play — toca no veículo (outros ouvem)."
+    elseif key == "casa" then
+        hint = "Chega perto do rádio/caixa da casa e dá Play — toca lá (outros ouvem)."
+    else
+        hint = "Segura o rádio/boombox na mão e dá Play — toca no rádio (outros ouvem)."
+    end
+    infoLabel(page, hint)
+
     local statusRow = rowFrame(page, 26)
     local status = new("TextLabel", {
         BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0),
@@ -1192,8 +1547,8 @@ local function musicSection(page, key, title)
         end},
     })
 
-    stepperRow(page, "Volume", 0, 10, 1, 5, function(v) ch.sound.Volume = v / 10 end, function(v) return (v * 10) .. "%" end)
-    toggleRow(page, "Repetir (loop)", false, function(v) ch.sound.Looped = v end)
+    stepperRow(page, "Volume", 0, 10, 1, 6, function(v) ch.setVolume(v / 10) end, function(v) return (v * 10) .. "%" end)
+    toggleRow(page, "Repetir (loop)", false, function(v) ch.setLoop(v) end)
 
     -- lista salva
     local listFrame = new("Frame", {
@@ -1316,8 +1671,15 @@ if chosenGame == "scp" then
     end)
 
     section(pScp, "AIMBOT")
-    infoLabel(pScp, "Círculo fixo no centro da tela (não segue o dedo). Mira na cabeça com predição. Use “Deixa invisível?” para esconder tudo.")
-    toggleRow(pScp, "AIMBOT (ligar/desligar)", false, function(v) S.aimbot = v end)
+    infoLabel(pScp, "Círculo fixo no centro. Sticky: entrou no círculo → trava e segue sem soltar a mira.")
+    toggleRow(pScp, "AIMBOT (ligar/desligar)", false, function(v)
+        S.aimbot = v
+        if not v then _G._felixAimLock = nil end
+    end)
+    toggleRow(pScp, "Sticky (seguir sem soltar)", true, function(v)
+        S.aimbotSticky = v
+        if not v then _G._felixAimLock = nil end
+    end)
     toggleRow(pScp, "Deixa invisível?", true, function(v) S.aimbotInvis = v end)
     stepperRow(pScp, "Tamanho (FOV)", 1, 100, 1, S.aimbotFov, function(v) S.aimbotFov = v end)
     stepperRow(pScp, "Sensibilidade", 1, 10, 0.5, S.aimbotSens, function(v) S.aimbotSens = v end, function(v)
@@ -1735,6 +2097,41 @@ buttonRow(pSistema, "Copiar ID do servidor", function()
     pcall(function() if setclipboard then setclipboard(game.JobId) end end)
 end)
 
+section(pSistema, "Configurações")
+infoLabel(pSistema, "Salva velocidade, fly, FOV, turbo, etc. entre execuções (se o executor permitir writefile).")
+local CFG_FILE = "FelixScripts_brook_config.json"
+local function saveConfig()
+    pcall(function()
+        if not writefile then return end
+        local data = {
+            speed = S.speed, jump = S.jump, flySpeed = S.flySpeed,
+            turboBoost = S.turboBoost, turboMax = S.turboMax,
+            vehFlySpeed = S.vehFlySpeed, fov = S.fov,
+        }
+        writefile(CFG_FILE, HttpService:JSONEncode(data))
+    end)
+end
+local function loadConfig()
+    pcall(function()
+        if not (isfile and isfile(CFG_FILE)) then return end
+        local data = HttpService:JSONDecode(readfile(CFG_FILE))
+        if data.speed then S.speed = data.speed end
+        if data.jump then S.jump = data.jump end
+        if data.flySpeed then S.flySpeed = data.flySpeed end
+        if data.turboBoost then S.turboBoost = data.turboBoost end
+        if data.turboMax then S.turboMax = data.turboMax end
+        if data.vehFlySpeed then S.vehFlySpeed = data.vehFlySpeed end
+        if data.fov then S.fov = data.fov end
+    end)
+end
+loadConfig()
+buttonRow(pSistema, "Salvar configurações", function()
+    saveConfig()
+end, C.on)
+buttonRow(pSistema, "Carregar configurações", function()
+    loadConfig()
+end)
+
 -- VEÍCULOS
 local pVeic = addTab("Veículos")
 section(pVeic, "Desempenho")
@@ -1742,6 +2139,41 @@ infoLabel(pVeic, "Entre em um veículo e ligue o turbo. Ele acelera o carro na d
 toggleRow(pVeic, "Turbo", false, function(v) S.turbo = v end)
 stepperRow(pVeic, "Força do turbo", 1, 20, 1, S.turboBoost, function(v) S.turboBoost = v end)
 stepperRow(pVeic, "Velocidade máxima", 80, 400, 20, S.turboMax, function(v) S.turboMax = v end)
+
+section(pVeic, "Fly de veículo")
+infoLabel(pVeic, "Sente no carro/moto e ligue. WASD move, Espaço sobe, Ctrl desce.")
+toggleRow(pVeic, "Fly do veículo", false, function(v) S.vehFly = v end)
+stepperRow(pVeic, "Velocidade do fly", 30, 250, 10, S.vehFlySpeed, function(v) S.vehFlySpeed = v end)
+
+section(pVeic, "Utilidades")
+buttonRow(pVeic, "Trazer veículo mais próximo", function()
+    local me = getRoot()
+    if not me then return end
+    local best, bestD
+    for _, m in ipairs(workspace:GetChildren()) do
+        if m:IsA("Model") and m ~= getChar() then
+            local seat = m:FindFirstChildWhichIsA("VehicleSeat", true) or m:FindFirstChildWhichIsA("Seat", true)
+            if seat then
+                local p = m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+                if p then
+                    local d = (p.Position - me.Position).Magnitude
+                    if not bestD or d < bestD then best, bestD = m, d end
+                end
+            end
+        end
+    end
+    if best then
+        local p = best.PrimaryPart or best:FindFirstChildWhichIsA("BasePart", true)
+        if p then
+            pcall(function()
+                best:PivotTo(me.CFrame * CFrame.new(0, 2, -10))
+            end)
+            pcall(function()
+                p.CFrame = me.CFrame * CFrame.new(0, 2, -10)
+            end)
+        end
+    end
+end, C.on)
 buttonRow(pVeic, "Sair do veículo", function()
     local h = getHum()
     if h then h.Sit = false h:ChangeState(Enum.HumanoidStateType.Jumping) end
@@ -1750,7 +2182,7 @@ musicSection(pVeic, "veiculo", "Música do veículo")
 
 -- CASAS
 local pCasas = addTab("Casas")
-infoLabel(pCasas, "Música separada para a casa. Ela toca em um canal próprio, independente da música geral e da do veículo.")
+infoLabel(pCasas, "Chegue perto do rádio/caixa da casa e dê Play. A música toca no rádio da casa para todo mundo ouvir.")
 musicSection(pCasas, "casa", "Música da casa")
 
 -- JOGADORES
@@ -1979,10 +2411,291 @@ refreshLocais = function()
 end
 refreshLocais()
 
+-- PROTEÇÃO
+local pProt = addTab("Proteção")
+section(pProt, "Proteções")
+infoLabel(pProt, "Ative o que quiser. “Proteção de tudo” liga anti-sit + veículos + fling de uma vez.")
+
+toggleRow(pProt, "Proteção contra sentar", false, function(v)
+    S.antiSit = v
+end)
+infoLabel(pProt, "Impede que te forcem a sentar (sofá, ônibus, assentos).")
+
+toggleRow(pProt, "Proteção de veículos", false, function(v)
+    S.antiVehicle = v
+end)
+infoLabel(pProt, "Sai automaticamente se te colocarem em veículo.")
+
+toggleRow(pProt, "Proteção anti-fling", false, function(v)
+    S.antiFling = v
+end)
+infoLabel(pProt, "Zera velocidade/rotação absurda e tenta remover fling no seu personagem.")
+
+toggleRow(pProt, "Proteção de tudo (ligar/desligar)", false, function(v)
+    S.protectAll = v
+    if v then
+        S.antiSit = true
+        S.antiVehicle = true
+        S.antiFling = true
+    end
+end)
+infoLabel(pProt, "Liga todas as proteções. Desligar este botão não desliga as individuais — desligue cada uma se quiser.")
+
+buttonRow(pProt, "Desligar todas as proteções", function()
+    S.protectAll = false
+    S.antiSit = false
+    S.antiVehicle = false
+    S.antiFling = false
+end, C.danger)
+
+-- TROLL (ônibus / sofá / puxar / lag)
+local pTrollBH = addTab("Troll")
+section(pTrollBH, "Alvo")
+infoLabel(pTrollBH, "Selecione um jogador na aba Jogadores. Depois escolha o método e ative.")
+
+local trollStatus = new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+    Font = Enum.Font.GothamMedium, Text = "Método: Ônibus | Troll: desligado",
+    TextSize = 12, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = nextOrder(),
+}, pTrollBH)
+
+local function updateTrollStatus()
+    local names = {onibus = "Ônibus", sofa = "Sofá", puxar = "Puxar", lag = "Lag"}
+    local m = names[S.trollMethod] or S.trollMethod
+    local on = S.trollActive and "ligado" or "desligado"
+    local alvo = selPlayer and selPlayer.DisplayName or "ninguém"
+    trollStatus.Text = string.format("Método: %s | Troll: %s | Alvo: %s", m, on, alvo)
+    trollStatus.TextColor3 = S.trollActive and C.danger or C.sub
+end
+
+section(pTrollBH, "Método (select)")
+multiButtonRow(pTrollBH, {
+    {text = "Ônibus", color = C.accent, fn = function()
+        S.trollMethod = "onibus"
+        updateTrollStatus()
+    end},
+    {text = "Sofá", color = C.rowHi, fn = function()
+        S.trollMethod = "sofa"
+        updateTrollStatus()
+    end},
+})
+multiButtonRow(pTrollBH, {
+    {text = "Puxar", color = C.on, fn = function()
+        S.trollMethod = "puxar"
+        updateTrollStatus()
+    end},
+    {text = "Lag", color = C.danger, fn = function()
+        S.trollMethod = "lag"
+        updateTrollStatus()
+    end},
+})
+infoLabel(pTrollBH, "Puxar: puxa o alvo até você. Lag: spam de objetos no alvo para dar lag (client).")
+
+local BUS_KW = {"bus", "ônibus", "onibus", "coach", "schoolbus", "transit"}
+local SOFA_KW = {"sofa", "sofá", "couch", "settee", "loveseat", "armchair"}
+
+local function nameHas(n, list)
+    n = string.lower(tostring(n or ""))
+    for _, kw in ipairs(list) do
+        if string.find(n, kw, 1, true) then return true end
+    end
+    return false
+end
+
+local function findTrollObject(method)
+    local kws = method == "sofa" and SOFA_KW or BUS_KW
+    local best, bestD
+    local me = getRoot()
+    local myPos = me and me.Position or Vector3.zero
+    -- procura no workspace
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        if (inst:IsA("Model") or inst:IsA("BasePart")) and nameHas(inst.Name, kws) then
+            local part = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+            if part and not (getChar() and inst:IsDescendantOf(getChar())) then
+                local d = (part.Position - myPos).Magnitude
+                -- prefere objetos um pouco longe (pra "trazer" do mapa)
+                if not bestD or d > bestD then
+                    -- na verdade queremos qualquer um; prioriza modelos com Seat
+                    local hasSeat = inst:IsA("Model") and (inst:FindFirstChildWhichIsA("Seat", true) or inst:FindFirstChildWhichIsA("VehicleSeat", true))
+                    if hasSeat or method == "sofa" then
+                        best, bestD = inst, d
+                    elseif not best then
+                        best, bestD = inst, d
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function moveModelTo(model, cf)
+    if not model then return false end
+    local ok = pcall(function()
+        if model:IsA("Model") then
+            model:PivotTo(cf)
+        elseif model:IsA("BasePart") then
+            model.CFrame = cf
+        end
+    end)
+    if not ok then
+        local part = model:IsA("BasePart") and model or model:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            pcall(function() part.CFrame = cf end)
+            if model:IsA("Model") then
+                for _, p in ipairs(model:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        pcall(function()
+                            p.CFrame = cf * (part.CFrame:ToObjectSpace(p.CFrame))
+                        end)
+                    end
+                end
+            end
+        end
+    end
+    return true
+end
+
+local trollObj = nil
+local trollVoid = Vector3.new(0, -500, 0)
+
+local function startTroll()
+    if not selPlayer then
+        trollStatus.Text = "Selecione um jogador na aba Jogadores!"
+        trollStatus.TextColor3 = C.danger
+        return
+    end
+    S.trollActive = true
+    updateTrollStatus()
+
+    if S.trollMethod == "puxar" or S.trollMethod == "lag" then
+        trollObj = nil
+        -- lag: tenta achar objetos próximos para spam
+        if S.trollMethod == "lag" then
+            trollObj = findTrollObject("onibus") or findTrollObject("sofa")
+        end
+        trollStatus.Text = S.trollMethod == "puxar"
+            and "Puxar ativo — arrastando alvo até você"
+            or "Lag ativo — spam no alvo"
+        trollStatus.TextColor3 = C.danger
+        return
+    end
+
+    -- ônibus / sofá
+    trollObj = findTrollObject(S.trollMethod)
+    if not trollObj then
+        trollStatus.Text = "Não achei " .. (S.trollMethod == "sofa" and "sofá" or "ônibus") .. " no mapa"
+        trollStatus.TextColor3 = C.danger
+        S.trollActive = false
+        return
+    end
+
+    local far = CFrame.new(0, 500, 0)
+    moveModelTo(trollObj, far)
+    task.wait(0.15)
+
+    local r = selPlayer.Character and selPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if r then moveModelTo(trollObj, r.CFrame * CFrame.new(0, 2, 0)) end
+    trollStatus.Text = "Troll ativo — objeto no alvo. Se ele sentar → void"
+    trollStatus.TextColor3 = C.danger
+end
+
+local function stopTroll()
+    S.trollActive = false
+    trollObj = nil
+    updateTrollStatus()
+end
+
+buttonRow(pTrollBH, "Ativar troll no selecionado", function()
+    startTroll()
+end, C.danger)
+buttonRow(pTrollBH, "Desativar troll", function()
+    stopTroll()
+end)
+buttonRow(pTrollBH, "Mandar alvo pro void agora", function()
+    local r = selPlayer and selPlayer.Character and selPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if r then
+        pcall(function() r.CFrame = CFrame.new(trollVoid) end)
+    end
+end, C.danger)
+
+infoLabel(pTrollBH, "Ônibus/Sofá: objeto no alvo, se sentar → void. Puxar: traz o alvo até você. Lag: spam no alvo. (Client — pode falhar se for server-side.)")
+
+-- loop do troll
+task.spawn(function()
+    while gui.Parent do
+        if S.trollActive and selPlayer and selPlayer.Parent then
+            local ch = selPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            local root = ch and ch:FindFirstChild("HumanoidRootPart")
+            local me = getRoot()
+
+            if S.trollMethod == "puxar" and root and me then
+                -- puxa o alvo até perto de você
+                pcall(function()
+                    root.CFrame = me.CFrame * CFrame.new(0, 0, -4)
+                end)
+            elseif S.trollMethod == "lag" and root then
+                -- spam: teleporta objeto / partes no alvo várias vezes
+                if trollObj and trollObj.Parent then
+                    for _ = 1, 4 do
+                        pcall(function()
+                            moveModelTo(trollObj, root.CFrame * CFrame.new(
+                                math.random(-2, 2), math.random(0, 3), math.random(-2, 2)
+                            ))
+                        end)
+                    end
+                else
+                    -- fallback: tenta puxar network de partes próximas unanchored
+                    pcall(function()
+                        for _, part in ipairs(workspace:GetDescendants()) do
+                            if part:IsA("BasePart") and not part.Anchored and part.AssemblyRootPart == part then
+                                if (part.Position - root.Position).Magnitude < 80 then
+                                    part.CFrame = root.CFrame
+                                    break
+                                end
+                            end
+                        end
+                    end)
+                end
+            else
+                -- ônibus / sofá
+                if trollObj and trollObj.Parent and root and hum and not hum.Sit then
+                    pcall(function()
+                        moveModelTo(trollObj, root.CFrame * CFrame.new(0, 1.5, 0))
+                    end)
+                end
+                if hum and hum.Sit and root then
+                    pcall(function()
+                        root.CFrame = CFrame.new(trollVoid)
+                        if hum.SeatPart then
+                            local seat = hum.SeatPart
+                            local body = seat.AssemblyRootPart or seat
+                            body.CFrame = CFrame.new(trollVoid)
+                            if trollObj then moveModelTo(trollObj, CFrame.new(trollVoid)) end
+                        end
+                    end)
+                    trollStatus.Text = "Alvo sentou → enviado pro void!"
+                    trollStatus.TextColor3 = C.on
+                end
+            end
+        end
+        task.wait(S.trollMethod == "lag" and 0.05 or 0.12)
+    end
+end)
+
+task.spawn(function()
+    while gui.Parent do
+        if currentTab == "Troll" then updateTrollStatus() end
+        task.wait(1)
+    end
+end)
+
 -- MÚSICA
 local pMusica = addTab("Música")
-infoLabel(pMusica, "Cole o ID do áudio, toque em Play e use + Lista para salvar com nome. A lista fica salva entre execuções (se o executor permitir).")
-musicSection(pMusica, "geral", "Música geral")
+infoLabel(pMusica, "Música GLOBAL: outros jogadores ouvem. Rádio na mão = geral | dentro do carro = veículo | perto da caixa = casa. Cole o ID e Play.")
+musicSection(pMusica, "geral", "Música geral (rádio na mão)")
 musicSection(pMusica, "casa", "Música da casa")
 musicSection(pMusica, "veiculo", "Música do veículo")
 
@@ -2054,7 +2767,17 @@ local function destroyAll()
     pcall(stopSpectate)
     pcall(function() if S.cinema then setCinema(false) end end)
     for _, ch in pairs(channels) do
-        pcall(function() ch.sound:Stop() ch.sound:Destroy() end)
+        pcall(function()
+            if ch.stop then ch.stop() end
+            if ch.localSound then ch.localSound:Stop() ch.localSound:Destroy() end
+            -- não destrói sound do rádio/veículo do jogo, só para
+            if ch.sound and ch.sound.Name and string.find(ch.sound.Name, "FelixGlobal") then
+                ch.sound:Stop()
+                ch.sound:Destroy()
+            elseif ch.sound then
+                ch.sound:Stop()
+            end
+        end)
     end
     pcall(function() gui:Destroy() end)
     pcall(function()
